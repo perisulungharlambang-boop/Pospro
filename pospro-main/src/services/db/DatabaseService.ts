@@ -1,4 +1,4 @@
-  // 🚀 FUNGSI SINKRONISASI ALL-IN-ONE (PRODUK, TRANSAKSI, CUSTOMERS, SUPPLIERS, & UTANG)
+  // 🚀 FUNGSI SINKRONISASI ALL-IN-ONE (VERSI AMAN UNTUK BUILD VERCEL)
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
@@ -13,21 +13,22 @@
       errors,
     };
 
+    // Fungsi pembuat string acak sederhana pengganti crypto.randomUUID
+    const makeSimpleId = () => Math.random().toString(36).substring(2, 15);
+
     try {
       // ─────────────────────────────────────────────
       // FASE 1: SINKRONISASI PELANGGAN (CUSTOMERS)
       // ─────────────────────────────────────────────
       try {
         onProgress?.('Membaca data pelanggan dari HP...', 5, 100);
-        // Pastikan nama import service indexdb pelanggan Anda sesuai (misal: indexdbCustomer)
-        // Jika belum ada/error saat build, Anda bisa bungkus atau lewatkan dulu
         const localCustomers = await (window as any).indexdbCustomer?.getAll() || [];
         if (localCustomers.length > 0) {
           let count = 0;
           for (const cust of localCustomers) {
             onProgress?.(`Mengunggah pelanggan: ${cust.name}...`, 5 + Math.floor((count / localCustomers.length) * 15), 100);
             const { error } = await supabase.from('customers').insert({
-              id: cust.id,
+              id: cust.id || makeSimpleId(),
               name: cust.name,
               email: cust.email || null,
               phone: cust.phone || null,
@@ -55,7 +56,7 @@
           for (const sup of localSuppliers) {
             onProgress?.(`Mengunggah supplier: ${sup.name}...`, 20 + Math.floor((count / localSuppliers.length) * 15), 100);
             const { error } = await supabase.from('suppliers').insert({
-              id: sup.id,
+              id: sup.id || makeSimpleId(),
               name: sup.name,
               email: sup.email || null,
               phone: sup.phone || null,
@@ -82,7 +83,7 @@
         for (const prod of localProducts) {
           onProgress?.(`Mengunggah produk: ${prod.name || 'Barang'}...`, 35 + Math.floor((count / localProducts.length) * 20), 100);
           const { error: prodError } = await supabase.from('products').insert({
-            id: prod.id,
+            id: prod.id || makeSimpleId(),
             name: prod.name || '',
             sku: prod.sku || prod.barcode || '',
             barcode: prod.barcode || prod.sku || '',
@@ -112,7 +113,6 @@
         for (const trx of unsyncedTransactions) {
           onProgress?.(`Mengunggah transaksi ${trx.id.substring(0,8)}...`, 55 + Math.floor((count / unsyncedTransactions.length) * 25), 100);
           
-          // Tulis ke tabel induk 'transactions'
           const { error: trxError } = await supabase.from('transactions').insert({
             id: trx.id,
             transaction_number: trx.id,
@@ -130,10 +130,9 @@
             continue;
           }
 
-          // Tulis ke tabel anak 'transaction_items'
           if (trx.items && Array.isArray(trx.items)) {
             const itemsToInsert = trx.items.map((item: any) => ({
-              id: `item-${trx.id}-${item.product_id || item.id || crypto.randomUUID()}`,
+              id: `item-${trx.id}-${item.product_id || item.id || makeSimpleId()}`,
               transaction_id: trx.id,
               product_id: item.product_id || item.id || '',
               quantity: item.qty || item.quantity || 1,
@@ -146,7 +145,6 @@
             if (itemsError) errors.push(`Items Trx [${trx.id}]: ${itemsError.message}`);
           }
 
-          // Tandai lokal aman
           trx.is_synced = true;
           await indexdbTransaksi.createRaw(trx);
           result.transactions.idbToSql++;
@@ -165,7 +163,7 @@
           for (const debt of localDebts) {
             onProgress?.(`Mengunggah data utang toko...`, 80 + Math.floor((count / localDebts.length) * 15), 100);
             const { error } = await supabase.from('debts').insert({
-              id: debt.id,
+              id: debt.id || makeSimpleId(),
               customer_id: debt.customer_id,
               transaction_id: debt.transaction_id || null,
               amount: debt.amount || 0,
@@ -189,5 +187,3 @@
 
     return result;
   }
-
-
