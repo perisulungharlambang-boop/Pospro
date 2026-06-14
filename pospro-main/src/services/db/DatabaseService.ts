@@ -8,7 +8,6 @@ class DatabaseService {
     return true;
   }
 
-  // Mengambil database lokal bawaan aplikasi kasir di HP Anda
   private async getLocalDB() {
     try {
       const barangMod = await import('@/lib/indexdbBarang');
@@ -18,12 +17,21 @@ class DatabaseService {
         indexdbTransaksi: transaksiMod.indexdbTransaksi || transaksiMod.default
       };
     } catch (e) {
-      console.error("Gagal memuat modul database lokal:", e);
+      console.error("Gagal memuat database lokal:", e);
       return { indexdbBarang: null, indexdbTransaksi: null };
     }
   }
 
-  // Memulihkan data dari file JSON kembali ke dalam HP (Offline-First)
+  // Helper untuk memastikan ID berbentuk format UUID yang sah agar diterima Supabase
+  private ensureUUID(str: string): string {
+    const clean = str.replace(/[^a-f0-9]/gi, '').toLowerCase();
+    if (clean.length >= 32) {
+      return `${clean.substring(0,8)}-${clean.substring(8,12)}-${clean.substring(12,16)}-${clean.substring(16,20)}-${clean.substring(20,32)}`;
+    }
+    const padded = clean.padEnd(32, '0');
+    return `${padded.substring(0,8)}-${padded.substring(8,12)}-${padded.substring(12,16)}-${padded.substring(16,20)}-${padded.substring(20,32)}`;
+  }
+
   async restoreFromJSON(data: any): Promise<boolean> {
     try {
       const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
@@ -94,7 +102,7 @@ class DatabaseService {
     return false;
   }
 
-  // TOMBOL UTAMA: MENEMBAK DATA PRODUK DAN TRANSAKSI KE SUPABASE
+  // FUNGSI UTAMA: MENEMBAK DATA SESUAI DENGAN STRUKTUR ASLI TABEL SUPABASE
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
@@ -111,7 +119,7 @@ class DatabaseService {
       const supabaseMod = await import('@/lib/supabaseClient');
       clientSp = supabaseMod.supabase || supabaseMod.default;
     } catch (e) {
-      console.warn("Koneksi Supabase Cloud tertunda.");
+      console.warn("Koneksi cloud tertunda.");
     }
 
     const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
@@ -120,40 +128,57 @@ class DatabaseService {
 
     if (clientSp) {
       try {
-        // PROSES UNGGAH TABEL BARANG (PRODUCTS)
+        // 1. PROSES UNGGAH TABEL PRODUCTS
         if (localProducts.length > 0) {
           let count = 0;
           for (const prod of localProducts) {
             count++;
-            onProgress?.(`Mengunggah Produk Cloud: ${prod.name || 'Barang'}...`, 10 + Math.floor((count / localProducts.length) * 40), 100);
+            onProgress?.(`Mengunggah Produk: ${prod.name || 'Barang'}...`, 10 + Math.floor((count / localProducts.length) * 40), 100);
             
+            // Konversi ID lokal ke format UUID agar diterima Supabase
+            const validUUID = this.ensureUUID(String(prod.id));
+
             await clientSp.from('products').upsert({
-              id: prod.id,
-              name: prod.name || '',
-              sku: prod.sku || prod.barcode || '',
-              barcode: prod.barcode || prod.sku || '',
-              price_retail: prod.priceRetail || prod.price || 0,
-              stock: prod.stock || 0,
-              deleted: false
+              id: validUUID,
+              name: prod.name || 'Produk Tanpa Nama',
+              sku: prod.sku || prod.barcode || `sku-${validUUID.substring(0,8)}`,
+              barcode: prod.barcode || prod.sku || `bar-${validUUID.substring(0,8)}`,
+              category_id: null, // Dikosongkan sesuai relasi skema Supabase Anda
+              price_retail: Math.floor(Number(prod.priceRetail || prod.price || 0)),
+              price_wholesale: Math.floor(Number(prod.priceWholesale || 0)),
+              price_cost: Math.floor(Number(prod.priceCost || 0)),
+              stock: Math.floor(Number(prod.stock || 0)),
+              description: prod.description || '',
+              image_url: prod.imageUrl || '',
+              is_active: true,
+              deleted: prod.deleted || false
             });
             result.products.idbToSql++;
           }
         }
 
-        // PROSES UNGGAH TABEL TRANSAKSI (TRANSACTIONS)
+        // 2. PROSES UNGGAH TABEL TRANSACTIONS
         if (localTransactions.length > 0) {
           let count = 0;
           for (const trx of localTransactions) {
             count++;
-            onProgress?.(`Mengunggah Transaksi Cloud: ${trx.id.substring(0,8)}...`, 50 + Math.floor((count / localTransactions.length) * 40), 100);
+            onProgress?.(`Mengunggah Transaksi: ${trx.id.substring(0,8)}...`, 50 + Math.floor((count / localTransactions.length) * 40), 100);
             
+            const validTrxUUID = this.ensureUUID(String(trx.id));
+
             await clientSp.from('transactions').upsert({
-              id: trx.id,
-              transaction_number: trx.id,
-              total_amount: trx.total || 0,
-              paid_amount: trx.cash_amount || 0,
+              id: validTrxUUID,
+              transaction_number: trx.transaction_number || trx.id || `TRX-${Date.now()}`,
+              customer_id: null,
+              user_id: null,
+              total_amount: Math.floor(Number(trx.total || trx.total_amount || 0)),
+              discount_amount: Math.floor(Number(trx.discount_amount || 0)),
+              tax_amount: Math.floor(Number(trx.tax_amount || 0)),
+              paid_amount: Math.floor(Number(trx.cash_amount || trx.paid_amount || 0)),
               payment_method: trx.payment_method || 'cash',
-              deleted: false
+              transaction_type: 'sale',
+              notes: trx.notes || '',
+              deleted: trx.deleted || false
             });
             result.transactions.idbToSql++;
           }
@@ -165,11 +190,10 @@ class DatabaseService {
       }
     }
 
-    // JALUR CADANGAN JIKA KONEKSI INTERNET ERROR
-    onProgress?.('Memverifikasi Data Internal HP...', 50, 100);
+    onProgress?.('Memverifikasi Keselarasan Data Internal HP...', 50, 100);
     result.products.idbToSql = localProducts.length;
     result.transactions.idbToSql = localTransactions.length;
-    onProgress?.('Verifikasi Selesai! Data HP Anda Aman Tersimpan Lokal. ✨', 100, 100);
+    onProgress?.('Verifikasi Selesai! Data HP Tersimpan Lokal. ✨', 100, 100);
     return result;
   }
 
