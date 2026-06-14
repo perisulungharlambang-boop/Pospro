@@ -1,3 +1,107 @@
+import { indexdbBarang } from '@/lib/indexdbBarang';
+import { indexdbTransaksi } from '@/lib/indexdbTransaksi';
+import { useSettingsStore } from '@/store/useSettingsStore';
+import { generateProductId } from '@/lib/utils';
+import { supabase } from '@/lib/supabaseClient'; 
+
+class DatabaseService {
+  private isInitialized = false;
+  private db: any = null; 
+
+  constructor() {}
+
+  async init(): Promise<boolean> {
+    if (this.isInitialized) return true;
+    try {
+      console.log("✅ Berjalan di browser, menggunakan IndexedDB untuk storage");
+      this.isInitialized = true;
+      return true;
+    } catch (error) {
+      console.error("❌ Gagal inisialisasi Database:", error);
+      return false;
+    }
+  }
+
+  private async createTables(): Promise<void> { return; }
+  private async checkNeedMigration(): Promise<boolean> { return false; }
+  private async doMigration(): Promise<void> { return; }
+
+  async backupToJSON(): Promise<any> {
+    await this.init();
+    const products = await indexdbBarang.getAllBarang();
+    const transactions = await indexdbTransaksi.getAll();
+    const settings = useSettingsStore.getState();
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      products,
+      transactions,
+      settings: settings.storeInfo ? { storeInfo: settings.storeInfo, printer: null } : {}
+    };
+  }
+
+  async restoreFromJSON(data: any): Promise<boolean> {
+    try {
+      if (data.products && Array.isArray(data.products)) {
+        await indexdbBarang.clearAll();
+        for (const p of data.products) await indexdbBarang.updateBarang(p);
+      }
+      if (data.transactions && Array.isArray(data.transactions)) {
+        await indexdbTransaksi.clearAll();
+        for (const trx of data.transactions) await indexdbTransaksi.createRaw(trx);
+      }
+      if (data.settings?.storeInfo) {
+        useSettingsStore.getState().updateStoreInfo(data.settings.storeInfo);
+      }
+      return true;
+    } catch (e) {
+      console.error("Restore error:", e);
+      return false;
+    }
+  }
+
+  async resetTransactionData(): Promise<boolean> {
+    try {
+      await indexdbTransaksi.clearAll();
+      return true;
+    } catch (e) {
+      console.error("Reset transaksi error:", e);
+      return false;
+    }
+  }
+
+  async exportData(): Promise<string> {
+    const data = await this.backupToJSON();
+    return JSON.stringify(data, null, 2);
+  }
+
+  async importData(json: string): Promise<boolean> {
+    try {
+      const data = JSON.parse(json);
+      return this.restoreFromJSON(data);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async importProducts(products: any[]): Promise<{ success: number; error: number; total: number }> {
+    let successCount = 0;
+    let errorCount = 0;
+    for (const product of products) {
+      try {
+        let finalProductId = product.id;
+        if (!finalProductId) {
+          finalProductId = generateProductId(product.sku, product.barcode) || `prod_autogen_${Math.random().toString(36).substring(2, 11)}`;
+        }
+        await indexdbBarang.updateBarang({ ...product, id: finalProductId });
+        successCount++;
+      } catch (err) {
+        errorCount++;
+      }
+    }
+    return { success: successCount, error: errorCount, total: successCount + errorCount };
+  }
+
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
@@ -16,7 +120,7 @@
 
     try {
       try {
-        onProgress?.('Membaca data pelanggan dari HP...', 5, 100);
+        onProgress?.('Membaca data pelanggan...', 5, 100);
         const localCustomers = await (window as any).indexdbCustomer?.getAll() || [];
         if (localCustomers.length > 0) {
           let count = 0;
@@ -41,7 +145,7 @@
       } catch (e: any) { console.log("Skip customers:", e.message); }
 
       try {
-        onProgress?.('Membaca data supplier dari HP...', 20, 100);
+        onProgress?.('Membaca data supplier...', 20, 100);
         const localSuppliers = await (window as any).indexdbSupplier?.getAll() || [];
         if (localSuppliers.length > 0) {
           let count = 0;
@@ -65,7 +169,7 @@
         }
       } catch (e: any) { console.log("Skip suppliers:", e.message); }
 
-      onProgress?.('Membaca data produk barang dari HP...', 35, 100);
+      onProgress?.('Membaca data produk barang...', 35, 100);
       const localProducts = await indexdbBarang.getAllBarang();
       if (localProducts.length > 0) {
         let count = 0;
@@ -90,7 +194,7 @@
         }
       }
 
-      onProgress?.('Membaca data transaksi dari HP...', 55, 100);
+      onProgress?.('Membaca data transaksi...', 55, 100);
       const localTransactions = await indexdbTransaksi.getAll();
       const unsyncedTransactions = localTransactions.filter((trx: any) => !trx.is_synced);
       
@@ -170,3 +274,12 @@
 
     return result;
   }
+
+  async getInstance(): Promise<this> {
+    await this.init();
+    return this;
+  }
+}
+
+export const databaseService = new DatabaseService();
+export const dbProvider = databaseService;
