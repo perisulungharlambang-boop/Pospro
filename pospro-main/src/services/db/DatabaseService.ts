@@ -13,35 +13,100 @@ class DatabaseService {
   private async checkNeedMigration(): Promise<boolean> { return false; }
   private async doMigration(): Promise<void> { return; }
 
+  // 1. FUNGSI BACKUP JSON NYATA
   async backupToJSON(): Promise<any> {
-    return { version: 1, exported_at: new Date().toISOString(), products: [], transactions: [] };
+    const localProducts = await (window as any).indexdbBarang?.getAllBarang() || [];
+    const localTransactions = await (window as any).indexdbTransaksi?.getAll() || [];
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      products: localProducts,
+      transactions: localTransactions
+    };
   }
 
-  async restoreFromJSON(data: any): Promise<boolean> { return true; }
-  async resetTransactionData(): Promise<boolean> { return true; }
-  async exportData(): Promise<string> { return "{}"; }
-  async importData(json: string): Promise<boolean> { return true; }
-  async importProducts(products: any[]): Promise<any> { return { success: 0, error: 0, total: 0 }; }
+  // 2. FUNGSI RESTORE JSON NYATA (Bukan Formalitas Lagi)
+  async restoreFromJSON(data: any): Promise<boolean> {
+    try {
+      if (data.products && Array.isArray(data.products) && (window as any).indexdbBarang) {
+        await (window as any).indexdbBarang.clearAll();
+        for (const p of data.products) {
+          await (window as any).indexdbBarang.updateBarang(p);
+        }
+      }
+      if (data.transactions && Array.isArray(data.transactions) && (window as any).indexdbTransaksi) {
+        await (window as any).indexdbTransaksi.clearAll();
+        for (const trx of data.transactions) {
+          await (window as any).indexdbTransaksi.createRaw(trx);
+        }
+      }
+      return true;
+    } catch (e) {
+      console.error("Gagal restore JSON:", e);
+      return false;
+    }
+  }
 
-  // FUNGSI SINKRONISASI SAPU JAGAT YANG LANGSUNG MEMANGGIL WINDOW.SUPABASE SECARA MANDIRI
+  async resetTransactionData(): Promise<boolean> {
+    try {
+      if ((window as any).indexdbTransaksi) {
+        await (window as any).indexdbTransaksi.clearAll();
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async exportData(): Promise<string> {
+    const data = await this.backupToJSON();
+    return JSON.stringify(data, null, 2);
+  }
+
+  async importData(json: string): Promise<boolean> {
+    try {
+      const data = JSON.parse(json);
+      return this.restoreFromJSON(data);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async importProducts(products: any[]): Promise<any> {
+    let successCount = 0;
+    let errorCount = 0;
+    if (!(window as any).indexdbBarang) return { success: 0, error: products.length, total: products.length };
+
+    for (const product of products) {
+      try {
+        let finalProductId = product.id || `prod_${Math.random().toString(36).substring(2, 11)}`;
+        await (window as any).indexdbBarang.updateBarang({ ...product, id: finalProductId });
+        successCount++;
+      } catch (err) {
+        errorCount++;
+      }
+    }
+    return { success: successCount, error: errorCount, total: successCount + errorCount };
+  }
+
+  // 3. FUNGSI SINKRONISASI SUPABASE NYATA
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
     const errors: string[] = [];
     const result = { platform: 'browser' as const, products: { idbToSql: 0 }, transactions: { idbToSql: 0 }, errors };
 
-    // Mengambil client supabase langsung dari window global atau store agar anti-error import
     const clientSp = (window as any).supabase;
     if (!clientSp) {
       onProgress?.('Mencari koneksi Supabase Cloud...', 10, 100);
-      errors.push('Client Supabase belum siap atau belum terhubung.');
+      errors.push('Client Supabase belum siap. Pastikan window.supabase sudah didaftarkan.');
       return result;
     }
 
     const makeSimpleId = () => Math.random().toString(36).substring(2, 15);
 
     try {
-      // 1. Ambil data produk dari IndexedDB lokal secara dinamis
       onProgress?.('Membaca data barang di HP...', 30, 100);
       const localProducts = await (window as any).indexdbBarang?.getAllBarang() || [];
       
@@ -63,7 +128,6 @@ class DatabaseService {
         }
       }
 
-      // 2. Ambil data transaksi dari IndexedDB lokal secara dinamis
       onProgress?.('Membaca data penjualan di HP...', 70, 100);
       const localTransactions = await (window as any).indexdbTransaksi?.getAll() || [];
       const unsyncedTransactions = localTransactions.filter((trx: any) => !trx.is_synced);
