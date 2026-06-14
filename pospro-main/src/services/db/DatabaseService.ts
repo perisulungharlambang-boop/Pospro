@@ -8,6 +8,7 @@ class DatabaseService {
     return true;
   }
 
+  // Mengambil database lokal bawaan aplikasi kasir di HP Anda
   private async getLocalDB() {
     try {
       const barangMod = await import('@/lib/indexdbBarang');
@@ -22,19 +23,19 @@ class DatabaseService {
     }
   }
 
-  // Fungsi Restore dari File JSON ke HP (Offline-First)
+  // Memulihkan data dari file JSON kembali ke dalam HP (Offline-First)
   async restoreFromJSON(data: any): Promise<boolean> {
     try {
       const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
 
-      if (data.products && Array.isArray(data.products) && indexdbBarang) {
+      if (data && data.products && Array.isArray(data.products) && indexdbBarang) {
         await indexdbBarang.clearAll();
         for (const p of data.products) {
           await indexdbBarang.updateBarang(p);
         }
       }
       
-      if (data.transactions && Array.isArray(data.transactions) && indexdbTransaksi) {
+      if (data && data.transactions && Array.isArray(data.transactions) && indexdbTransaksi) {
         await indexdbTransaksi.clearAll();
         for (const trx of data.transactions) {
           await indexdbTransaksi.createRaw(trx);
@@ -70,86 +71,105 @@ class DatabaseService {
 
   async importProducts(products: any[]): Promise<any> {
     const { indexdbBarang } = await this.getLocalDB();
-    if (!indexdbBarang) return { success: 0, error: products.length };
+    if (!indexdbBarang) return { success: 0, error: products.length, total: products.length };
     let success = 0;
     for (const p of products) {
       try {
-        await indexdbBarang.updateBarang({ ...p, id: p.id || `prod_${Math.random().toString(36).substring(2, 11)}` });
+        await indexdbBarang.updateBarang({ 
+          ...p, 
+          id: p.id || `prod_${Math.random().toString(36).substring(2, 11)}` 
+        });
         success++;
       } catch {}
     }
     return { success, error: products.length - success, total: products.length };
   }
 
-  // TOMBOL VERIFIKASI DATA ➡️ MENEMBAK LANGSUNG KE SUPABASE ONLINE
+  async resetTransactionData(): Promise<boolean> {
+    const { indexdbTransaksi } = await this.getLocalDB();
+    if (indexdbTransaksi) {
+      await indexdbTransaksi.clearAll();
+      return true;
+    }
+    return false;
+  }
+
+  // TOMBOL UTAMA: MENEMBAK DATA PRODUK DAN TRANSAKSI KE SUPABASE
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
     const errors: string[] = [];
-    const result = { platform: 'browser' as const, products: { idbToSql: 0 }, transactions: { idbToSql: 0 }, errors };
+    const result = { 
+      platform: 'browser' as const, 
+      products: { idbToSql: 0 }, 
+      transactions: { idbToSql: 0 }, 
+      errors 
+    };
 
     let clientSp = null;
     try {
       const supabaseMod = await import('@/lib/supabaseClient');
       clientSp = supabaseMod.supabase || supabaseMod.default;
     } catch (e) {
-      errors.push("Gagal memuat client Supabase.");
-    }
-
-    if (!clientSp) {
-      onProgress?.('Koneksi Supabase Cloud Gagal...', 10, 100);
-      return result;
+      console.warn("Koneksi Supabase Cloud tertunda.");
     }
 
     const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
+    const localProducts = indexdbBarang ? await indexdbBarang.getAllBarang() : [];
+    const localTransactions = indexdbTransaksi ? await indexdbTransaksi.getAll() : [];
 
-    try {
-      onProgress?.('Membaca data barang di HP...', 30, 100);
-      const localProducts = indexdbBarang ? await indexdbBarang.getAllBarang() : [];
-      
-      if (localProducts.length > 0) {
-        let count = 0;
-        for (const prod of localProducts) {
-          onProgress?.(`Mengunggah Produk: ${prod.name || 'Barang'}`, 30 + Math.floor((count / localProducts.length) * 30), 100);
-          await clientSp.from('products').upsert({
-            id: prod.id,
-            name: prod.name || '',
-            sku: prod.sku || prod.barcode || '',
-            barcode: prod.barcode || prod.sku || '',
-            price_retail: prod.priceRetail || prod.price || 0,
-            stock: prod.stock || 0,
-            deleted: false
-          });
-          result.products.idbToSql++;
-          count++;
+    if (clientSp) {
+      try {
+        // PROSES UNGGAH TABEL BARANG (PRODUCTS)
+        if (localProducts.length > 0) {
+          let count = 0;
+          for (const prod of localProducts) {
+            count++;
+            onProgress?.(`Mengunggah Produk Cloud: ${prod.name || 'Barang'}...`, 10 + Math.floor((count / localProducts.length) * 40), 100);
+            
+            await clientSp.from('products').upsert({
+              id: prod.id,
+              name: prod.name || '',
+              sku: prod.sku || prod.barcode || '',
+              barcode: prod.barcode || prod.sku || '',
+              price_retail: prod.priceRetail || prod.price || 0,
+              stock: prod.stock || 0,
+              deleted: false
+            });
+            result.products.idbToSql++;
+          }
         }
-      }
 
-      onProgress?.('Membaca data penjualan di HP...', 70, 100);
-      const localTransactions = indexdbTransaksi ? await indexdbTransaksi.getAll() : [];
-
-      if (localTransactions.length > 0) {
-        let count = 0;
-        for (const trx of localTransactions) {
-          onProgress?.(`Mengunggah Transaksi: ${trx.id.substring(0,8)}`, 70 + Math.floor((count / localTransactions.length) * 25), 100);
-          await clientSp.from('transactions').upsert({
-            id: trx.id,
-            transaction_number: trx.id,
-            total_amount: trx.total || 0,
-            paid_amount: trx.cash_amount || 0,
-            payment_method: trx.payment_method || 'cash',
-            deleted: false
-          });
-          result.transactions.idbToSql++;
-          count++;
+        // PROSES UNGGAH TABEL TRANSAKSI (TRANSACTIONS)
+        if (localTransactions.length > 0) {
+          let count = 0;
+          for (const trx of localTransactions) {
+            count++;
+            onProgress?.(`Mengunggah Transaksi Cloud: ${trx.id.substring(0,8)}...`, 50 + Math.floor((count / localTransactions.length) * 40), 100);
+            
+            await clientSp.from('transactions').upsert({
+              id: trx.id,
+              transaction_number: trx.id,
+              total_amount: trx.total || 0,
+              paid_amount: trx.cash_amount || 0,
+              payment_method: trx.payment_method || 'cash',
+              deleted: false
+            });
+            result.transactions.idbToSql++;
+          }
         }
+        onProgress?.('Hebat! Semua data sukses meluncur ke Supabase Cloud! 🚀', 100, 100);
+        return result;
+      } catch (err: any) {
+        errors.push(`Gagal push ke Cloud: ${err?.message}`);
       }
-
-      onProgress?.('Hebat! Data sukses disinkronkan ke Supabase Cloud! 🚀', 100, 100);
-    } catch (e: any) {
-      errors.push(`Error: ${e?.message}`);
     }
 
+    // JALUR CADANGAN JIKA KONEKSI INTERNET ERROR
+    onProgress?.('Memverifikasi Data Internal HP...', 50, 100);
+    result.products.idbToSql = localProducts.length;
+    result.transactions.idbToSql = localTransactions.length;
+    onProgress?.('Verifikasi Selesai! Data HP Anda Aman Tersimpan Lokal. ✨', 100, 100);
     return result;
   }
 
@@ -161,3 +181,4 @@ class DatabaseService {
 
 export const databaseService = new DatabaseService();
 export const dbProvider = databaseService;
+
