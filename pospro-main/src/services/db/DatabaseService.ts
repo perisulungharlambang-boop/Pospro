@@ -3,18 +3,11 @@
 class DatabaseService {
   private isInitialized = false;
 
-  constructor() {}
-
   async init(): Promise<boolean> {
     this.isInitialized = true;
     return true;
   }
 
-  private async createTables(): Promise<void> { return; }
-  private async checkNeedMigration(): Promise<boolean> { return false; }
-  private async doMigration(): Promise<void> { return; }
-
-  // Fungsi dinamis memuat modul database asli aplikasi (IndexedDB)
   private async getLocalDB() {
     try {
       const barangMod = await import('@/lib/indexdbBarang');
@@ -29,21 +22,7 @@ class DatabaseService {
     }
   }
 
-  // 1. FUNGSI BACKUP UNTUK TOMBOL "BACKUP SELURUH DATA"
-  async backupToJSON(): Promise<any> {
-    const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
-    const localProducts = indexdbBarang ? await indexdbBarang.getAllBarang() : [];
-    const localTransactions = indexdbTransaksi ? await indexdbTransaksi.getAll() : [];
-    
-    return {
-      version: 1,
-      exported_at: new Date().toISOString(),
-      products: localProducts,
-      transactions: localTransactions
-    };
-  }
-
-  // 2. FUNGSI RESTORE UNTUK MEMASUKKAN DATA KEMBALI KE APLIKASI
+  // Fungsi Restore dari File JSON ke HP (Offline-First)
   async restoreFromJSON(data: any): Promise<boolean> {
     try {
       const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
@@ -63,86 +42,112 @@ class DatabaseService {
       }
       return true;
     } catch (e) {
-      console.error("Gagal melakukan restore JSON:", e);
       return false;
     }
   }
 
-  async resetTransactionData(): Promise<boolean> {
-    try {
-      const { indexdbTransaksi } = await this.getLocalDB();
-      if (indexdbTransaksi) {
-        await indexdbTransaksi.clearAll();
-        return true;
-      }
-      return false;
-    } catch (e) {
-      return false;
-    }
+  async backupToJSON(): Promise<any> {
+    const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      products: indexdbBarang ? await indexdbBarang.getAllBarang() : [],
+      transactions: indexdbTransaksi ? await indexdbTransaksi.getAll() : []
+    };
   }
 
   async exportData(): Promise<string> {
-    const data = await this.backupToJSON();
-    return JSON.stringify(data, null, 2);
+    return JSON.stringify(await this.backupToJSON(), null, 2);
   }
 
   async importData(json: string): Promise<boolean> {
     try {
-      const data = JSON.parse(json);
-      return this.restoreFromJSON(data);
+      return this.restoreFromJSON(JSON.parse(json));
     } catch (e) {
       return false;
     }
   }
 
-  // 3. FUNGSI UNTUK TOMBOL "IMPORT PRODUK JSON"
   async importProducts(products: any[]): Promise<any> {
-    let successCount = 0;
-    let errorCount = 0;
     const { indexdbBarang } = await this.getLocalDB();
-    if (!indexdbBarang) return { success: 0, error: products.length, total: products.length };
-
-    for (const product of products) {
+    if (!indexdbBarang) return { success: 0, error: products.length };
+    let success = 0;
+    for (const p of products) {
       try {
-        let finalProductId = product.id || `prod_${Math.random().toString(36).substring(2, 11)}`;
-        await indexdbBarang.updateBarang({ ...product, id: finalProductId });
-        successCount++;
-      } catch (err) {
-        errorCount++;
-      }
+        await indexdbBarang.updateBarang({ ...p, id: p.id || `prod_${Math.random().toString(36).substring(2, 11)}` });
+        success++;
+      } catch {}
     }
-    return { success: successCount, error: errorCount, total: successCount + errorCount };
+    return { success, error: products.length - success, total: products.length };
   }
 
-  // 4. JALUR SINKRONISASI ASLI UNTUK TOMBOL "VERIFIKASI DATA" (INDEXEDDB <> SQLITE LOKAL)
+  // TOMBOL VERIFIKASI DATA ➡️ MENEMBAK LANGSUNG KE SUPABASE ONLINE
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
     const errors: string[] = [];
-    const result = { 
-      platform: 'browser' as const, 
-      products: { idbToSql: 0 }, 
-      transactions: { idbToSql: 0 }, 
-      errors 
-    };
+    const result = { platform: 'browser' as const, products: { idbToSql: 0 }, transactions: { idbToSql: 0 }, errors };
+
+    let clientSp = null;
+    try {
+      const supabaseMod = await import('@/lib/supabaseClient');
+      clientSp = supabaseMod.supabase || supabaseMod.default;
+    } catch (e) {
+      errors.push("Gagal memuat client Supabase.");
+    }
+
+    if (!clientSp) {
+      onProgress?.('Koneksi Supabase Cloud Gagal...', 10, 100);
+      return result;
+    }
+
+    const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
 
     try {
-      onProgress?.('Menghubungkan ke SQLite (poskasir.db)...', 10, 100);
-      const { indexdbBarang, indexdbTransaksi } = await this.getLocalDB();
-      
-      // Ambil data dari cache browser (IndexedDB)
+      onProgress?.('Membaca data barang di HP...', 30, 100);
       const localProducts = indexdbBarang ? await indexdbBarang.getAllBarang() : [];
+      
+      if (localProducts.length > 0) {
+        let count = 0;
+        for (const prod of localProducts) {
+          onProgress?.(`Mengunggah Produk: ${prod.name || 'Barang'}`, 30 + Math.floor((count / localProducts.length) * 30), 100);
+          await clientSp.from('products').upsert({
+            id: prod.id,
+            name: prod.name || '',
+            sku: prod.sku || prod.barcode || '',
+            barcode: prod.barcode || prod.sku || '',
+            price_retail: prod.priceRetail || prod.price || 0,
+            stock: prod.stock || 0,
+            deleted: false
+          });
+          result.products.idbToSql++;
+          count++;
+        }
+      }
+
+      onProgress?.('Membaca data penjualan di HP...', 70, 100);
       const localTransactions = indexdbTransaksi ? await indexdbTransaksi.getAll() : [];
 
-      onProgress?.(`Sinkronisasi ${localProducts.length} Produk ke SQLite...`, 40, 100);
-      result.products.idbToSql = localProducts.length;
+      if (localTransactions.length > 0) {
+        let count = 0;
+        for (const trx of localTransactions) {
+          onProgress?.(`Mengunggah Transaksi: ${trx.id.substring(0,8)}`, 70 + Math.floor((count / localTransactions.length) * 25), 100);
+          await clientSp.from('transactions').upsert({
+            id: trx.id,
+            transaction_number: trx.id,
+            total_amount: trx.total || 0,
+            paid_amount: trx.cash_amount || 0,
+            payment_method: trx.payment_method || 'cash',
+            deleted: false
+          });
+          result.transactions.idbToSql++;
+          count++;
+        }
+      }
 
-      onProgress?.(`Sinkronisasi ${localTransactions.length} Riwayat Transaksi...`, 80, 100);
-      result.transactions.idbToSql = localTransactions.length;
-
-      onProgress?.('Verifikasi Berhasil! Database IndexedDB & SQLite Sinkron. 🚀', 100, 100);
+      onProgress?.('Hebat! Data sukses disinkronkan ke Supabase Cloud! 🚀', 100, 100);
     } catch (e: any) {
-      errors.push(`Gagal sinkronisasi: ${e?.message}`);
+      errors.push(`Error: ${e?.message}`);
     }
 
     return result;
@@ -156,4 +161,3 @@ class DatabaseService {
 
 export const databaseService = new DatabaseService();
 export const dbProvider = databaseService;
-
