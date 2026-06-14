@@ -1,4 +1,3 @@
-  // 🚀 FUNGSI SINKRONISASI ALL-IN-ONE (VERSI AMAN UNTUK BUILD VERCEL)
   async syncDatabases(
     onProgress?: (step: string, current: number, total: number) => void
   ): Promise<any> {
@@ -13,13 +12,9 @@
       errors,
     };
 
-    // Fungsi pembuat string acak sederhana pengganti crypto.randomUUID
     const makeSimpleId = () => Math.random().toString(36).substring(2, 15);
 
     try {
-      // ─────────────────────────────────────────────
-      // FASE 1: SINKRONISASI PELANGGAN (CUSTOMERS)
-      // ─────────────────────────────────────────────
       try {
         onProgress?.('Membaca data pelanggan dari HP...', 5, 100);
         const localCustomers = await (window as any).indexdbCustomer?.getAll() || [];
@@ -43,11 +38,8 @@
             count++;
           }
         }
-      } catch (e: any) { console.log("Skip atau error customers:", e.message); }
+      } catch (e: any) { console.log("Skip customers:", e.message); }
 
-      // ─────────────────────────────────────────────
-      // FASE 2: SINKRONISASI PEMASOK (SUPPLIERS)
-      // ─────────────────────────────────────────────
       try {
         onProgress?.('Membaca data supplier dari HP...', 20, 100);
         const localSuppliers = await (window as any).indexdbSupplier?.getAll() || [];
@@ -71,11 +63,8 @@
             count++;
           }
         }
-      } catch (e: any) { console.log("Skip atau error suppliers:", e.message); }
+      } catch (e: any) { console.log("Skip suppliers:", e.message); }
 
-      // ─────────────────────────────────────────────
-      // FASE 3: SINKRONISASI PRODUK BARANG
-      // ─────────────────────────────────────────────
       onProgress?.('Membaca data produk barang dari HP...', 35, 100);
       const localProducts = await indexdbBarang.getAllBarang();
       if (localProducts.length > 0) {
@@ -101,9 +90,6 @@
         }
       }
 
-      // ─────────────────────────────────────────────
-      // FASE 4: SINKRONISASI TRANSAKSI & DETAIL ITEM
-      // ─────────────────────────────────────────────
       onProgress?.('Membaca data transaksi dari HP...', 55, 100);
       const localTransactions = await indexdbTransaksi.getAll();
       const unsyncedTransactions = localTransactions.filter((trx: any) => !trx.is_synced);
@@ -119,7 +105,7 @@
             total_amount: trx.total || 0,
             paid_amount: trx.cash_amount || 0,
             payment_method: trx.payment_method || 'cash',
-            notes: `Web Sync - All Data`,
+            notes: `Web Sync`,
             created_at: trx.created_at || new Date().toISOString(),
             updated_at: new Date().toISOString(),
             deleted: false
@@ -152,9 +138,6 @@
         }
       }
 
-      // ─────────────────────────────────────────────
-      // FASE 5: SINKRONISASI UTANG (DEBTS)
-      // ─────────────────────────────────────────────
       try {
         onProgress?.('Membaca data rekapan utang...', 80, 100);
         const localDebts = await (window as any).indexdbDebts?.getAll() || [];
@@ -178,9 +161,9 @@
             count++;
           }
         }
-      } catch (e: any) { console.log("Skip atau error debts:", e.message); }
+      } catch (e: any) { console.log("Skip debts:", e.message); }
 
-      onProgress?.('Seluruh data (Pelanggan, Supplier, Produk, Transaksi, & Utang) berhasil disinkronkan! 🚀', 100, 100);
+      onProgress?.('Seluruh data berhasil disinkronkan! 🚀', 100, 100);
     } catch (e: any) {
       errors.push(`Sistem Error Global: ${e?.message}`);
     }
